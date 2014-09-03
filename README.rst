@@ -28,8 +28,8 @@ Setup
 In your dockerfile, add:
 
 .. code-block:: sh
-    RUN apt-get -qqy install runit python
-    RUN wget "https://github.com/rbarrois/bicti/..." -O /sbin/bicti
+    RUN apt-get -qqy install runit python python-pip
+    RUN pip install bicti && ln -s /sbin/bicti `which bicti`
     ADD ./bicti.ini /etc/bicti.ini
     RUN /sbin/bicti --setup
     ENTRYPOINT "/sbin/bicti"

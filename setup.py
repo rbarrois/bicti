@@ -43,6 +43,7 @@ setup(
     scripts=[
         PACKAGE,
     ],
+    install_requires=(['argparse'] if sys.version_info[:2] < (2, 7) else []),
     setup_requires=[
         'setuptools>=0.8',
     ],
