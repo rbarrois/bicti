@@ -13,7 +13,6 @@ Its features include:
 - Declarative list of supported commands
 - Launch all demons or only a few ones
 - Drop into a shell instead
-- 
 
 
 Depencies
