@@ -1,0 +1,228 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""Handle pre-startup or runit."""
+
+from __future__ import unicode_literals, print_function
+
+__version__ = '0.1.0'
+
+import argparse
+import re
+import os
+import sys
+
+if sys.version_info[0] <= 2:
+    import ConfigParser as configparser
+else:
+    import configparser
+
+
+DEFAULT_SHELL = '/bin/bash'
+
+
+class Paths(object):
+    """Current running environment.
+
+    Mostly paths.
+    """
+
+    DEFAULTS = dict(
+        BICTI_CONFIG='etc/bicti.ini',
+        RUNIT_BIN='sbin/runit',
+        RUNIT_DIR='etc/runit',
+        RUNIT_SV_DIR='etc/services',
+    )
+
+    DEFAULT_ROOT='/'
+
+    def __init__(self, root=DEFAULT_ROOT):
+        self._paths = dict(self.DEFAULTS)
+        self.root = root
+
+    def chroot(self, new_root):
+        self.root = new_root
+
+    def __getattr__(self, attr):
+        if attr not in self._paths:
+            raise AttributeError("%r has no attribute %s" % (self, attr))
+        return os.path.join(self.root, self._paths[attr])
+
+    def __str__(self):
+        return '<Paths(root=%r)>' % self.root
+
+
+PATHS = Paths()
+
+
+def as_list(line):
+    """Convert a comma-or-space separated list of entries to a list.
+
+    >>> as_list('foo bar, baz,blah')
+    ['foo', 'bar', 'baz', 'blah']
+    """
+    if not line:
+        return []
+    return [
+        item.strip()
+        for item in line.split(',')
+        if item.strip()
+    ]
+
+
+class ServiceConfig(object):
+    def __init__(self, name, options):
+        self.name = name
+        self.command = options['command']
+        self.after = options.get('after')
+        self.setup_command = options.get('setup', '')
+        self.uid = options.get('uid', '0')
+        self.gid = options.get('gid', '0')
+
+    def runfile_contents(self):
+        tpl = "#!/bin/sh\n%(wait_parent)s\n%(setup_command)s\nexec chpst -u%(uid)s -g%(gid)s %(command)s"
+
+        if self.after:
+            wait_parent = 'sv start %s || exit 1' % self.after
+        else:
+            wait_parent = ''
+
+        return tpl % dict(
+            uid=self.uid,
+            gid=self.gid,
+            command=self.command,
+            setup_command=self.setup_command,
+            wait_parent=wait_parent,
+        )
+
+    def deploy(self):
+        service_dir = os.path.join(PATHS.RUNIT_SV_DIR, self.name)
+        run_path = os.path.join(service_dir, 'run')
+        os.makedirs(service_dir, mode=0o755, exist_ok=True)
+        with open(run_path, 'w') as f:
+            f.write(self.runfile_contents())
+
+    def setup(self, enabled):
+        service_dir = os.path.join(PATHS.RUNIT_SV_DIR, self.name)
+        down_path = os.path.join(service_dir, 'down')
+        if enabled:
+            if os.path.exists(down_path):
+                os.unlink(down_path)
+        else:
+            with open(down_path, 'w'):
+                pass
+
+
+class BictiConfig(object):
+    def __init__(self, options):
+        self.global_setup = options.get('setup') or ''
+        self.global_teardown = options.get('teardown') or ''
+
+    def deploy(self):
+        os.makedirs(PATHS.RUNIT_DIR, mode=0o755, exist_ok=True)
+
+        with open(os.path.join(PATHS.RUNIT_DIR, '1'), 'w') as f:
+            f.write('#!/bin/sh\n%s' % self.global_setup)
+
+        with open(os.path.join(PATHS.RUNIT_DIR, '2'), 'w') as f:
+            f.write('#!/bin/sh\nexec runsvdir -P %s' % PATHS.RUNIT_SV_DIR)
+
+        with open(os.path.join(PATHS.RUNIT_DIR, '3'), 'w') as f:
+            f.write('#!/bin/sh\n%s' % self.global_teardown)
+
+
+class Runner(object):
+    def __init__(self, config, services):
+        self.config = config
+        self.services = services
+
+    def deploy(self):
+        self.config.deploy()
+        for service in self.services.values():
+            service.deploy()
+
+    def start(self, active_services):
+
+        print("Starting services %s" % ', '.join(active_services))
+
+        for sv_name, service in self.services.items():
+            service.setup(sv_name in active_services)
+
+        self.exec(RUNIT_BIN)
+
+    def exec(self, cmd, cmd_args=()):
+        # Cleanup
+        sys.stdout.flush()
+        sys.stderr.flush()
+        # Command expects itself as first argument.
+        cmd_args = (cmd,) + cmd_args
+        os.execvp(cmd, cmd_args)
+
+    @classmethod
+    def from_config(cls, config_file):
+        config, services = cls.parse_config(config_file)
+        return cls(config, services)
+
+    @classmethod
+    def parse_config(cls, config_file, fail=True):
+        cp = configparser.ConfigParser()
+        cp.read([config_file])
+
+        try:
+            core = dict(cp.items('bicti'))
+        except configparser.NoSectionError:
+            return BictiConfig({}), {}
+
+        global_config = BictiConfig(core)
+
+        services = {}
+
+        for section in cp.sections():
+            if section == 'bicti':
+                continue
+            services[section] = ServiceConfig(section, dict(cp.items(section)))
+
+        return global_config, services
+
+
+class FixedArgumentParser(argparse.ArgumentParser):
+    def _check_value(self, action, value):
+        if action.nargs in (argparse.OPTIONAL, argparse.ZERO_OR_MORE) and not value:
+            return
+        super(FixedArgumentParser, self)._check_value(action, value)
+
+
+def main(argv):
+
+    pre_parser = FixedArgumentParser(description="Bicti, the docker inner setup.", add_help=False)
+    pre_parser.add_argument('--config', '-c', default=PATHS.BICTI_CONFIG, help="Read configuration from CONFIG")
+    pre_parser.add_argument('--root', default=PATHS.DEFAULT_ROOT, help="Use paths relative to ROOT")
+    args, _rem = pre_parser.parse_known_args(argv)
+
+    PATHS.chroot(args.root)
+    config, services = Runner.parse_config(args.config, fail=False)
+
+    parser = pre_parser
+    parser.add_argument('-h', '--help', action='help', help="Show this help message and exit")
+    parser.add_argument('-v', '--version', action='version', version='%(prog)s ' + __version__)
+
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--setup', action='store_true', help="Setup the service files")
+    group.add_argument('--shell', nargs='?', default=None, const=DEFAULT_SHELL, help="Drop to a shell (default=%s)" % DEFAULT_SHELL)
+    group.add_argument('--all', action='store_true', help="Start all services")
+    group.add_argument('services', metavar='SERVICE', nargs='*', choices=list(services.keys()),
+        help="Services to start (valid options: %s)" % ','.join(sorted(services)), default=[])
+
+    args = parser.parse_args(argv)
+    runner = Runner.from_config(args.config)
+    if args.setup:
+        runner.deploy()
+    elif args.services:
+        runner.start(args.services)
+    elif args.all:
+        runner.start(services.keys())
+    elif args.shell:
+        runner.exec(args.shell)
+
+if __name__ == '__main__':
+    main(sys.argv[1:])
