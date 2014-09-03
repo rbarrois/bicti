@@ -38,9 +38,24 @@ In your dockerfile, add:
 This will:
 
 1. Retrieve bicti and its dependencies
-2. Load your ``bicti.ini`` configuration file (expected at ``/sbin/bicti``)
+2. Load your ``bicti.ini`` configuration file (expected at ``/etc/bicti.ini``)
 3. Setup all daemon startup scripts in ``/etc/runit``
 4. Declare bicti as your entry point.
+
+
+Core concepts
+-------------
+
+Beyond a few command-line flags, most of bicti's job is in setting up the configuration
+for ``runit``.
+
+Upon startup, bicti will:
+
+1. Load its configuration file (``/etc/bicti.ini``)
+2. Setup ``runit`` to start the declared services
+3. Transfer control to ``runit``, which handles daemon auto-restart, orphan process reaping, etc.
+
+
 
 Usage
 -----
